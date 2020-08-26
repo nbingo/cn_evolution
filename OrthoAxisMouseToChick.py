@@ -112,7 +112,33 @@ class CTDataLoader(DataLoader):
 
         # At this point we've found the correct mask for the mouse, so we have to transfer it to the chicken
         chicken_data = sc.read(f'withcolors/mouse_ex_colors.h5ad')
-
+        # Label each observation with its region and species
+        chicken_data.obs['clusters'] = chicken_data.obs['clusters'].apply(lambda s: 'C_' + s)
+        chicken_data.obs['subregion'] = chicken_data.obs['clusters'].apply(lambda s: s.split('.')[0])
+        m_to_c = pd.read_csv('gene_translations.csv')
+        # We only care about one to one orthologs
+        m_to_c = m_to_c[m_to_c['Mouse homology type'] == 'ortholog_one2one']
+        # Get the relevant names of the mouse genes
+        mouse_r_gene_names = species_data.var.index[self.r_axis_mask]
+        mouse_ct_gene_names = species_data.var.index[self.ct_axis_mask]
+        # Get only the homologous mouse genes
+        m_homologs = set(m_to_c[['Mouse gene name', 'Mouse gene stable ID']].to_numpy().flatten())
+        h_mouse_r_gene_names = set(mouse_r_gene_names).intersection(m_homologs)
+        h_mouse_ct_gene_names = set(mouse_ct_gene_names).intersection(m_homologs)
+        # Get the corresponding chicken gene names and IDs
+        h_chick_r_gene_names = m_to_c[m_to_c['Mouse gene name'].isin(h_mouse_r_gene_names)]     # Select the rows
+        # Get the actual names and IDs
+        h_chick_r_gene_names = h_chick_r_gene_names.loc[:, ['Gene stable ID', 'Gene name']].to_numpy().flatten()
+        # Remove nans
+        h_chick_r_gene_names = h_chick_r_gene_names[~pd.isnull(h_chick_r_gene_names)]
+        # Repeat for cell type genes
+        h_chick_ct_gene_names = m_to_c[m_to_c['Mouse gene name'].isin(h_mouse_ct_gene_names)]
+        h_chick_ct_gene_names = h_chick_ct_gene_names.loc[:, ['Gene stable ID', 'Gene name']].to_numpy().flatten()
+        h_chick_ct_gene_names = h_chick_ct_gene_names[~pd.isnull(h_chick_ct_gene_names)]
+        # Now, from the scRNA data we collected, find which genes we want
+        # These are the actual masks that we want, so set them as well
+        self.r_axis_mask = chicken_data.var.index.str.upper().isin(h_chick_r_gene_names)
+        self.ct_axis_mask = chicken_data.var.index.str.upper().isin(h_chick_ct_gene_names)
 
         # Average transcriptomes within each cell type and put into data frame with cell types as rows and genes as cols
         ct_names = np.unique(chicken_data.obs['clusters'])
@@ -146,7 +172,7 @@ class CTDataLoader(DataLoader):
 
 
 if __name__ == '__main__':
-    ct_data_loader = CTDataLoader('chicken', reprocess=False)
+    ct_data_loader = CTDataLoader(reprocess=True)
 
     agglomerate = Agglomerate3D(
         cell_type_affinity=spearmanr_connectivity,
