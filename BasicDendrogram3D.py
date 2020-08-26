@@ -1,3 +1,6 @@
+import sys
+sys.path.insert(1, '/Users/noamringach/PycharmProjects/3dtrees')
+
 from agglomerate.agglomerate_3d import Agglomerate3D
 from data.data_loader import DataLoader
 from metrics.metric_utils import spearmanr_connectivity

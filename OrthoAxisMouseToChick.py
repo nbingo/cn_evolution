@@ -22,8 +22,10 @@ GENE_CORR_THRESH = 0.5
 
 class CTDataLoader(DataLoader):
 
-    def __init__(self, species: str, reprocess: Optional[bool] = False):
+    def __init__(self, reprocess: Optional[bool] = False):
         super().__init__()
+        # We're going to find the right mask for the mouse and then use it on the chicken
+        species = 'mouse'
 
         filename = f'{species}_ex_colors'
 
@@ -108,11 +110,15 @@ class CTDataLoader(DataLoader):
         self.r_axis_mask[r_axis_mask_indices[r_corr_genes]] = False
         self.ct_axis_mask[ct_axis_mask_indices[ct_corr_genes]] = False
 
+        # At this point we've found the correct mask for the mouse, so we have to transfer it to the chicken
+        chicken_data = sc.read(f'withcolors/mouse_ex_colors.h5ad')
+
+
         # Average transcriptomes within each cell type and put into data frame with cell types as rows and genes as cols
-        ct_names = np.unique(species_data.obs['clusters'])
-        ct_avg_data = [species_data[species_data.obs['clusters'] == ct].X.mean(axis=0) for ct in ct_names]
-        self.data = pd.concat([pd.DataFrame(data, columns=species_data.var.index, index=[cluster_name])
-                               for data, cluster_name in zip(ct_avg_data, np.unique(species_data.obs['clusters']))])
+        ct_names = np.unique(chicken_data.obs['clusters'])
+        ct_avg_data = [chicken_data[chicken_data.obs['clusters'] == ct].X.mean(axis=0) for ct in ct_names]
+        self.data = pd.concat([pd.DataFrame(data, columns=chicken_data.var.index, index=[cluster_name])
+                               for data, cluster_name in zip(ct_avg_data, np.unique(chicken_data.obs['clusters']))])
         # Divide each row by mean, as in Tosches et al, rename columns,
         # and transpose so that column labels are genes and rows are cell types
         # Divide each row by mean
