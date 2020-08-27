@@ -38,7 +38,7 @@ class CTDataLoader(DataLoader):
         mouse_data = sc.read(f'withcolors/mouse_ex_colors.h5ad')
 
         # Label each observation with its region and species
-        mouse_data.obs['clusters'] = mouse_data.obs['clusters'].apply(lambda s: species[0].upper() + '_' + s)
+        mouse_data.obs['clusters'] = mouse_data.obs['clusters'].apply(lambda s: 'M_' + s)
         mouse_data.obs['subregion'] = mouse_data.obs['clusters'].apply(lambda s: s.split('.')[0])
 
         # Split different regions into separate AnnData-s
@@ -106,6 +106,10 @@ class CTDataLoader(DataLoader):
         self.r_axis_mask[r_axis_mask_indices[r_corr_genes]] = False
         self.ct_axis_mask[ct_axis_mask_indices[ct_corr_genes]] = False
 
+        if sc.settings.verbosity >= 0:
+            print(f'Finished finding mouse cell type and region varying genes.\n'
+                  f'Found {self.r_axis_mask.sum()} region genes and {self.ct_axis_mask.sum()} cell type genes.')
+
         ################################################################################################################
         # At this point we've found the correct mask for the mouse, so we have to transfer it to the chicken
         ################################################################################################################
@@ -134,9 +138,93 @@ class CTDataLoader(DataLoader):
         h_chick_ct_gene_names = h_chick_ct_gene_names.loc[:, ['Gene stable ID', 'Gene name']].to_numpy().flatten()
         h_chick_ct_gene_names = h_chick_ct_gene_names[~pd.isnull(h_chick_ct_gene_names)]
         # Now, from the scRNA data we collected, find which genes we want
-        # These are the actual masks that we want, so set them as well
-        self.r_axis_mask = chicken_data.var.index.str.upper().isin(h_chick_r_gene_names)
-        self.ct_axis_mask = chicken_data.var.index.str.upper().isin(h_chick_ct_gene_names)
+        # These are the actual masks that we want, so save them
+        r_axis_mask_from_mouse = chicken_data.var.index.str.upper().isin(h_chick_r_gene_names)
+        ct_axis_mask_from_mouse = chicken_data.var.index.str.upper().isin(h_chick_ct_gene_names)
+
+        if sc.settings.verbosity >= 0:
+            print('Finished finding one-to-one orthologs of mouse genes in the chicken.\n'
+                  f'Found {r_axis_mask_from_mouse.sum()} region genes '
+                  f'and {ct_axis_mask_from_mouse.sum()} cell type genes.')
+        ################################################################################################################
+        # Now compute the region and cell type genes how we normally would for the chicken so we can intersect them
+        ################################################################################################################
+
+        # Split different regions into separate AnnData-s
+        chicken_data_region_split = [chicken_data[chicken_data.obs['subregion'] == sr] for sr in
+                                     np.unique(chicken_data.obs['subregion'])]
+
+        # Compute DEGs between different subregions to get region axis mask
+        sc.tl.rank_genes_groups(chicken_data, groupby='subregion', method='wilcoxon')
+        # Filter by adjusted p value and log fold change
+        r_axis_name_mask = ((pd.DataFrame(chicken_data.uns['rank_genes_groups']['pvals_adj']) < P_VAL_ADJ_THRESH) &
+                            (pd.DataFrame(chicken_data.uns['rank_genes_groups']['logfoldchanges']) > AVG_LOG_FC_THRESH))
+        # Our current mask is actually for names sorted by their z-scores, so have to get back to the original ordering
+        r_axis_filtered_names = pd.DataFrame(chicken_data.uns['rank_genes_groups']['names'])[r_axis_name_mask]
+        # Essentially take union between DEGs of different regions
+        r_axis_filtered_names = r_axis_filtered_names.to_numpy().flatten()
+        # Now go through genes in their original order and check if they are in our list of genes
+        self.r_axis_mask = chicken_data.var.index.isin(r_axis_filtered_names)
+
+        # Compute DEGs between cell types within subregions to get cell type axis mask
+        ct_degs_by_subregion = []
+        # Iterate over regions in this species
+        for sr in chicken_data_region_split:
+            # Need to have at least one cell type in the region
+            if len(np.unique(sr.obs['clusters'])) > 1:
+                # Compute DEGs for cell types in this region
+                sc.tl.rank_genes_groups(sr, groupby='clusters', method='wilcoxon')
+                # Filter by adjusted p value and log fold change
+                deg_names_mask = ((pd.DataFrame(sr.uns['rank_genes_groups']['pvals_adj']) < P_VAL_ADJ_THRESH) &
+                                  (pd.DataFrame(sr.uns['rank_genes_groups']['logfoldchanges']) > AVG_LOG_FC_THRESH))
+                # Get the names
+                ct_degs_by_subregion.append(pd.DataFrame(sr.uns['rank_genes_groups']['names'])[deg_names_mask])
+
+        # Construct mask of genes in original ordering
+        # Essentially take union between DEGs of different regions
+        ct_axis_filtered_names = np.concatenate([degs.to_numpy().flatten() for degs in ct_degs_by_subregion])
+        # Get rid of nans
+        ct_axis_filtered_names = ct_axis_filtered_names[~pd.isnull(ct_axis_filtered_names)]
+        # Now go through genes in their original order and check if they are in our list of genes
+        self.ct_axis_mask = chicken_data.var.index.isin(ct_axis_filtered_names)
+
+        # Find correlated genes between ct_axis_mask and r_axis_mask and remove them from both
+        # First remove genes that appear in both masks since they must contain both ct and region information
+        intersect_mask = self.r_axis_mask & self.ct_axis_mask
+        self.r_axis_mask[intersect_mask] = False
+        self.ct_axis_mask[intersect_mask] = False
+        # Get raw expression data for leftover relevant ct and region genes
+        r_genes_raw = chicken_data.X[:, self.r_axis_mask].toarray()
+        ct_genes_raw = chicken_data.X[:, self.ct_axis_mask].toarray()
+        # Compute correlation coefficient between all genes. Unfortunately can't just do all ct to all region
+        # and will have to only select those later
+        # Should result in a (len(r_genes_raw) + len(ct_genes_raw)) side square matrix
+        corrcoefs = stats.spearmanr(r_genes_raw, ct_genes_raw).correlation
+        # Threshold the correlations by magnitude, since a negative correlation is still information
+        corrcoefs_significant = np.abs(corrcoefs) > GENE_CORR_THRESH
+        # Find any ct genes that are correlated to a region gene or vice-versa
+        # ct genes that are correlated to some region gene
+        num_r_genes = r_genes_raw.shape[1]
+        ct_corr_genes = corrcoefs_significant[num_r_genes:, :num_r_genes].any(axis=1)
+        # region genes that are correlated to some cell type gene
+        r_corr_genes = corrcoefs_significant[:num_r_genes, num_r_genes:].any(axis=1)
+        # Convert the masks to indices to correctly remove correlated regions from them
+        r_axis_mask_indices = np.where(self.r_axis_mask)[0]
+        ct_axis_mask_indices = np.where(self.ct_axis_mask)[0]
+        # Remove correlated genes
+        self.r_axis_mask[r_axis_mask_indices[r_corr_genes]] = False
+        self.ct_axis_mask[ct_axis_mask_indices[ct_corr_genes]] = False
+
+        if sc.settings.verbosity >= 0:
+            print(f'Finished finding chicken cell type and region varying genes.\n'
+                  f'Found {self.r_axis_mask.sum()} region genes and {self.ct_axis_mask.sum()} cell type genes.')
+
+        # Take the intersection with the genes from the mouse
+        self.r_axis_mask &= r_axis_mask_from_mouse
+        self.ct_axis_mask &= ct_axis_mask_from_mouse
+        if sc.settings.verbosity >= 0:
+            print(f'There are {self.r_axis_mask.sum()} region genes '
+                  f'and {self.ct_axis_mask.sum()} cell type genes left after intersection.')
 
         # Average transcriptomes within each cell type and put into data frame with cell types as rows and genes as cols
         ct_names = np.unique(chicken_data.obs['clusters'])
@@ -177,7 +265,7 @@ if __name__ == '__main__':
         linkage_cell='complete',
         linkage_region='homolog_avg',
         max_region_diff=1,
-        region_dist_scale=.7,
+        region_dist_scale=.86,
         verbose=False,
         pbar=True,
         integrity_check=True
