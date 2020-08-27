@@ -4,7 +4,7 @@ sys.path.insert(1, '/Users/noamringach/PycharmProjects/3dtrees')
 from agglomerate.agglomerate_3d import Agglomerate3D
 from data.data_loader import DataLoader
 from metrics.metric_utils import spearmanr_connectivity
-from typing import List, Optional
+from typing import Optional, Sequence
 import numpy as np
 import pandas as pd
 import time
@@ -13,7 +13,7 @@ from scipy import stats
 import os
 import pickle
 
-sc.settings.verbosity = 4  # Please tell me everything all the time
+sc.settings.verbosity = 0  # Please tell me everything all the time
 
 P_VAL_ADJ_THRESH = 0.01
 AVG_LOG_FC_THRESH = 2
@@ -30,8 +30,8 @@ class CTDataLoader(DataLoader):
         filename = f'{species}_ex_colors'
 
         # Used saved data if possible
-        if not reprocess and os.path.exists(f'withcolors_preprocessed/{filename}.pickle'):
-            with open(f'withcolors_preprocessed/{filename}.pickle', mode='rb') as file:
+        if not reprocess and os.path.exists(f'withcolors_preprocessed/chicken_from_mouse_ex_colors.pickle'):
+            with open(f'withcolors_preprocessed/chicken_from_mouse_ex_colors.pickle', mode='rb') as file:
                 data_dict = pickle.load(file)
                 self.data = data_dict['data']
                 self.ct_axis_mask = data_dict['ct_axis_mask']
@@ -110,8 +110,10 @@ class CTDataLoader(DataLoader):
         self.r_axis_mask[r_axis_mask_indices[r_corr_genes]] = False
         self.ct_axis_mask[ct_axis_mask_indices[ct_corr_genes]] = False
 
+        ################################################################################################################
         # At this point we've found the correct mask for the mouse, so we have to transfer it to the chicken
-        chicken_data = sc.read(f'withcolors/mouse_ex_colors.h5ad')
+        ################################################################################################################
+        chicken_data = sc.read(f'withcolors/chicken_ex_colors.h5ad')
         # Label each observation with its region and species
         chicken_data.obs['clusters'] = chicken_data.obs['clusters'].apply(lambda s: 'C_' + s)
         chicken_data.obs['subregion'] = chicken_data.obs['clusters'].apply(lambda s: s.split('.')[0])
@@ -152,13 +154,13 @@ class CTDataLoader(DataLoader):
 
         # Save data
         data_dict = {'data': self.data, 'ct_axis_mask': self.ct_axis_mask, 'r_axis_mask': self.r_axis_mask}
-        with open(f'withcolors_preprocessed/{filename}.pickle', mode='wb') as file:
+        with open(f'withcolors_preprocessed/chicken_from_mouse_ex_colors.pickle', mode='wb') as file:
             pickle.dump(data_dict, file)
 
-    def get_names(self) -> List[str]:
+    def get_names(self) -> Sequence[str]:
         return self.data.index.values
 
-    def get_corresponding_region_names(self) -> List[str]:
+    def get_corresponding_region_names(self) -> Sequence[str]:
         def get_region(ct_name: str):
             return ct_name.split('.')[0]
 
