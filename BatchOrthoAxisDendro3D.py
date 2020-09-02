@@ -1,3 +1,6 @@
+import sys
+sys.path.insert(1, '/Users/noamringach/PycharmProjects/3dtrees')
+
 from agglomerate.batch_agglomerate_3d import BatchAgglomerate3D
 from OrthoAxisDendro3D import CTDataLoader
 from metrics.metric_utils import spearmanr_connectivity
@@ -5,13 +8,13 @@ import pandas as pd
 import numpy as np
 
 if __name__ == '__main__':
-    data = CTDataLoader('chicken')
+    data = CTDataLoader('mouse', remove_correlated=False)
     agglomerate = BatchAgglomerate3D(
         linkage_cell=['complete'],
         linkage_region=['homolog_avg'],
         cell_type_affinity=[spearmanr_connectivity],
         max_region_diff=[1],
-        region_dist_scale=np.arange(0.1, 3, 0.005),
+        region_dist_scale=np.arange(0.1, 1.5, 0.005),
         verbose=False
     )
 
