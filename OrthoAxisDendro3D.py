@@ -62,9 +62,12 @@ class CTDataLoader(DataLoader):
         # Compute DEGs between different subregions to get region axis mask
         sc.tl.rank_genes_groups(species_data, groupby='subregion', method='wilcoxon')
         # Filter by adjusted p value and log fold change
-        r_axis_name_mask = ((pd.DataFrame(species_data.uns['rank_genes_groups']['pvals_adj']) < P_VAL_ADJ_THRESH)
-                            # & (pd.DataFrame(species_data.uns['rank_genes_groups']['logfoldchanges']) > AVG_LOG_FC_THRESH)
-                            )
+        # noinspection PyTypeChecker
+        r_axis_name_mask = (pd.DataFrame(species_data.uns['rank_genes_groups']['pvals_adj']) < P_VAL_ADJ_THRESH)
+        if dim_reduction is None:
+            # noinspection PyTypeChecker
+            r_axis_name_mask &= pd.DataFrame(species_data.uns['rank_genes_groups']['logfoldchanges']) \
+                                > AVG_LOG_FC_THRESH
         # Our current mask is actually for names sorted by their z-scores, so have to get back to the original ordering
         r_axis_filtered_names = pd.DataFrame(species_data.uns['rank_genes_groups']['names'])[r_axis_name_mask]
         # Essentially take union between DEGs of different regions
@@ -83,9 +86,12 @@ class CTDataLoader(DataLoader):
                 # Compute DEGs for cell types in this region
                 sc.tl.rank_genes_groups(sr, groupby='clusters', method='wilcoxon')
                 # Filter by adjusted p value and log fold change
-                deg_names_mask = ((pd.DataFrame(sr.uns['rank_genes_groups']['pvals_adj']) < P_VAL_ADJ_THRESH)
-                                  # & (pd.DataFrame(sr.uns['rank_genes_groups']['logfoldchanges']) > AVG_LOG_FC_THRESH)
-                                  )
+                # noinspection PyTypeChecker
+                deg_names_mask = pd.DataFrame(sr.uns['rank_genes_groups']['pvals_adj']) < P_VAL_ADJ_THRESH
+                if dim_reduction is None:
+                    # noinspection PyTypeChecker
+                    deg_names_mask &= pd.DataFrame(sr.uns['rank_genes_groups']['logfoldchanges']) > AVG_LOG_FC_THRESH
+
                 # Get the names
                 ct_degs_by_subregion.append(pd.DataFrame(sr.uns['rank_genes_groups']['names'])[deg_names_mask])
 
@@ -138,7 +144,7 @@ class CTDataLoader(DataLoader):
         # Divide each row by mean, as in Tosches et al, rename columns,
         # and transpose so that column labels are genes and rows are cell types
         # Divide each row by mean
-        self.data = self.data.div(self.data.mean(axis=0).to_numpy(), axis=1)
+        self.data = self.data.div(self.data.mean(axis=0).to_numpy(), axis=1)        # noqa
 
         # Save data
         data_dict = {'data': self.data, 'ct_axis_mask': self.ct_axis_mask, 'r_axis_mask': self.r_axis_mask}
