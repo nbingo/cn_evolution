@@ -4,12 +4,13 @@ sys.path.insert(1, '/Users/noamringach/PycharmProjects/3dtrees')
 from agglomerate.agglomerate_3d import Agglomerate3D
 from data.data_loader import DataLoader
 from metrics.metric_utils import spearmanr_connectivity
-from typing import List, Optional
+from typing import Sequence, Optional
 import numpy as np
 import pandas as pd
 import time
 import scanpy as sc
-from scipy import stats
+from anndata import AnnData
+from scipy import stats, sparse
 import os
 import pickle
 
@@ -22,7 +23,8 @@ GENE_CORR_THRESH = 0.5
 
 class CTDataLoader(DataLoader):
 
-    def __init__(self, species: str, reprocess: Optional[bool] = False):
+    def __init__(self, species: str, reprocess: Optional[bool] = False, remove_correlated: Optional[bool] = True,
+                 dim_reduction: Optional[str] = None, n_components: Optional[int] = None):
         super().__init__()
 
         filename = f'{species}_ex_colors'
@@ -38,6 +40,18 @@ class CTDataLoader(DataLoader):
                 return
 
         species_data = sc.read(f'withcolors/{filename}.h5ad')
+        if dim_reduction is not None:
+            sc.pp.pca(species_data, n_comps=n_components)
+            sc.pp.highly_variable_genes(species_data)
+            sc.pp.neighbors(species_data, n_pcs=n_components)
+            if dim_reduction == 'pca':
+                sc.tl.pca(species_data, n_comps=n_components)
+            elif dim_reduction == 'umap':
+                sc.tl.umap(species_data, n_components=n_components)
+            elif dim_reduction == 'tsne':
+                sc.tl.tsne(species_data, n_pcs=n_components)
+            species_data = AnnData(species_data.obsm[f'X_{dim_reduction}'], obs=species_data.obs)
+            species_data.var.index = pd.Index([f'{dim_reduction}{x}' for x in range(len(species_data.var.index))])
 
         # Label each observation with its region and species
         species_data.obs['clusters'] = species_data.obs['clusters'].apply(lambda s: species[0].upper() + '_' + s)
@@ -50,12 +64,15 @@ class CTDataLoader(DataLoader):
         # Compute DEGs between different subregions to get region axis mask
         sc.tl.rank_genes_groups(species_data, groupby='subregion', method='wilcoxon')
         # Filter by adjusted p value and log fold change
-        r_axis_name_mask = ((pd.DataFrame(species_data.uns['rank_genes_groups']['pvals_adj']) < P_VAL_ADJ_THRESH) &
-                            (pd.DataFrame(species_data.uns['rank_genes_groups']['logfoldchanges']) > AVG_LOG_FC_THRESH))
+        r_axis_name_mask = ((pd.DataFrame(species_data.uns['rank_genes_groups']['pvals_adj']) < P_VAL_ADJ_THRESH)
+                            # & (pd.DataFrame(species_data.uns['rank_genes_groups']['logfoldchanges']) > AVG_LOG_FC_THRESH)
+                            )
         # Our current mask is actually for names sorted by their z-scores, so have to get back to the original ordering
         r_axis_filtered_names = pd.DataFrame(species_data.uns['rank_genes_groups']['names'])[r_axis_name_mask]
         # Essentially take union between DEGs of different regions
         r_axis_filtered_names = r_axis_filtered_names.to_numpy().flatten()
+        # remove nans
+        r_axis_filtered_names = r_axis_filtered_names[~pd.isnull(r_axis_filtered_names)]
         # Now go through genes in their original order and check if they are in our list of genes
         self.r_axis_mask = species_data.var.index.isin(r_axis_filtered_names)
 
@@ -68,8 +85,9 @@ class CTDataLoader(DataLoader):
                 # Compute DEGs for cell types in this region
                 sc.tl.rank_genes_groups(sr, groupby='clusters', method='wilcoxon')
                 # Filter by adjusted p value and log fold change
-                deg_names_mask = ((pd.DataFrame(sr.uns['rank_genes_groups']['pvals_adj']) < P_VAL_ADJ_THRESH) &
-                                  (pd.DataFrame(sr.uns['rank_genes_groups']['logfoldchanges']) > AVG_LOG_FC_THRESH))
+                deg_names_mask = ((pd.DataFrame(sr.uns['rank_genes_groups']['pvals_adj']) < P_VAL_ADJ_THRESH)
+                                  # & (pd.DataFrame(sr.uns['rank_genes_groups']['logfoldchanges']) > AVG_LOG_FC_THRESH)
+                                  )
                 # Get the names
                 ct_degs_by_subregion.append(pd.DataFrame(sr.uns['rank_genes_groups']['names'])[deg_names_mask])
 
@@ -81,38 +99,42 @@ class CTDataLoader(DataLoader):
         # Now go through genes in their original order and check if they are in our list of genes
         self.ct_axis_mask = species_data.var.index.isin(ct_axis_filtered_names)
 
-        # Find correlated genes between ct_axis_mask and r_axis_mask and remove them from both
-        # First remove genes that appear in both masks since they must contain both ct and region information
-        intersect_mask = self.r_axis_mask & self.ct_axis_mask
-        self.r_axis_mask[intersect_mask] = False
-        self.ct_axis_mask[intersect_mask] = False
-        # Get raw expression data for leftover relevant ct and region genes
-        r_genes_raw = species_data.X[:, self.r_axis_mask].toarray()
-        ct_genes_raw = species_data.X[:, self.ct_axis_mask].toarray()
-        # Compute correlation coefficient between all genes. Unfortunately can't just do all ct to all region
-        # and will have to only select those later
-        # Should result in a (len(r_genes_raw) + len(ct_genes_raw)) side square matrix
-        corrcoefs = stats.spearmanr(r_genes_raw, ct_genes_raw).correlation
-        # Threshold the correlations by magnitude, since a negative correlation is still information
-        corrcoefs_significant = np.abs(corrcoefs) > GENE_CORR_THRESH
-        # Find any ct genes that are correlated to a region gene or vice-versa
-        # ct genes that are correlated to some region gene
-        num_r_genes = r_genes_raw.shape[1]
-        ct_corr_genes = corrcoefs_significant[num_r_genes:, :num_r_genes].any(axis=1)
-        # region genes that are correlated to some cell type gene
-        r_corr_genes = corrcoefs_significant[:num_r_genes, num_r_genes:].any(axis=1)
-        # Convert the masks to indices to correctly remove correlated regions from them
-        r_axis_mask_indices = np.where(self.r_axis_mask)[0]
-        ct_axis_mask_indices = np.where(self.ct_axis_mask)[0]
-        # Remove correlated genes
-        self.r_axis_mask[r_axis_mask_indices[r_corr_genes]] = False
-        self.ct_axis_mask[ct_axis_mask_indices[ct_corr_genes]] = False
+        if remove_correlated:
+            # Find correlated genes between ct_axis_mask and r_axis_mask and remove them from both
+            # First remove genes that appear in both masks since they must contain both ct and region information
+            intersect_mask = self.r_axis_mask & self.ct_axis_mask
+            self.r_axis_mask[intersect_mask] = False
+            self.ct_axis_mask[intersect_mask] = False
+            # Get raw expression data for leftover relevant ct and region genes
+            r_genes_raw = species_data.X[:, self.r_axis_mask]
+            ct_genes_raw = species_data.X[:, self.ct_axis_mask]
+            if isinstance(species_data.X, sparse.csc_matrix):
+                r_genes_raw = r_genes_raw.toarray()
+                ct_genes_raw = ct_genes_raw.toarray()
+            # Compute correlation coefficient between all genes. Unfortunately can't just do all ct to all region
+            # and will have to only select those later
+            # Should result in a (len(r_genes_raw) + len(ct_genes_raw)) side square matrix
+            corrcoefs = stats.spearmanr(r_genes_raw, ct_genes_raw).correlation
+            # Threshold the correlations by magnitude, since a negative correlation is still information
+            corrcoefs_significant = np.abs(corrcoefs) > GENE_CORR_THRESH
+            # Find any ct genes that are correlated to a region gene or vice-versa
+            # ct genes that are correlated to some region gene
+            num_r_genes = r_genes_raw.shape[1]
+            ct_corr_genes = corrcoefs_significant[num_r_genes:, :num_r_genes].any(axis=1)
+            # region genes that are correlated to some cell type gene
+            r_corr_genes = corrcoefs_significant[:num_r_genes, num_r_genes:].any(axis=1)
+            # Convert the masks to indices to correctly remove correlated regions from them
+            r_axis_mask_indices = np.where(self.r_axis_mask)[0]
+            ct_axis_mask_indices = np.where(self.ct_axis_mask)[0]
+            # Remove correlated genes
+            self.r_axis_mask[r_axis_mask_indices[r_corr_genes]] = False
+            self.ct_axis_mask[ct_axis_mask_indices[ct_corr_genes]] = False
 
         # Average transcriptomes within each cell type and put into data frame with cell types as rows and genes as cols
         ct_names = np.unique(species_data.obs['clusters'])
         ct_avg_data = [species_data[species_data.obs['clusters'] == ct].X.mean(axis=0) for ct in ct_names]
-        self.data = pd.concat([pd.DataFrame(data, columns=species_data.var.index, index=[cluster_name])
-                               for data, cluster_name in zip(ct_avg_data, np.unique(species_data.obs['clusters']))])
+        self.data = pd.concat([pd.DataFrame(data.reshape((1, -1)), columns=species_data.var.index, index=[cluster_name])
+                               for data, cluster_name in zip(ct_avg_data, ct_names)])
         # Divide each row by mean, as in Tosches et al, rename columns,
         # and transpose so that column labels are genes and rows are cell types
         # Divide each row by mean
@@ -123,10 +145,10 @@ class CTDataLoader(DataLoader):
         with open(f'withcolors_preprocessed/{filename}.pickle', mode='wb') as file:
             pickle.dump(data_dict, file)
 
-    def get_names(self) -> List[str]:
+    def get_names(self) -> Sequence[str]:
         return self.data.index.values
 
-    def get_corresponding_region_names(self) -> List[str]:
+    def get_corresponding_region_names(self) -> Sequence[str]:
         def get_region(ct_name: str):
             return ct_name.split('.')[0]
 
@@ -140,7 +162,8 @@ class CTDataLoader(DataLoader):
 
 
 if __name__ == '__main__':
-    ct_data_loader = CTDataLoader('chicken', reprocess=False)
+    ct_data_loader = CTDataLoader('chicken', reprocess=True, remove_correlated=True,
+                                  dim_reduction=None, n_components=50)
 
     agglomerate = Agglomerate3D(
         cell_type_affinity=spearmanr_connectivity,
