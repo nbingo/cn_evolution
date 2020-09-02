@@ -38,7 +38,7 @@ class CTDataLoader(DataLoader):
         mouse_data = sc.read(f'withcolors/mouse_ex_colors.h5ad')
 
         # Label each observation with its region and species
-        mouse_data.obs['clusters'] = mouse_data.obs['clusters'].apply(lambda s: species[0].upper() + '_' + s)
+        mouse_data.obs['clusters'] = mouse_data.obs['clusters'].apply(lambda s: 'M_' + s)
         mouse_data.obs['subregion'] = mouse_data.obs['clusters'].apply(lambda s: s.split('.')[0])
 
         # Split different regions into separate AnnData-s
