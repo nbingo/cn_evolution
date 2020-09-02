@@ -22,7 +22,7 @@ GENE_CORR_THRESH = 0.5
 
 class CTDataLoader(DataLoader):
 
-    def __init__(self, reprocess: Optional[bool] = False):
+    def __init__(self, reprocess: Optional[bool] = False, remove_correlated: Optional[bool] = True):
         super().__init__()
         # We're going to find the right mask for the mouse and then use it on the chicken
         # Used saved data if possible
@@ -79,32 +79,33 @@ class CTDataLoader(DataLoader):
         # Now go through genes in their original order and check if they are in our list of genes
         self.ct_axis_mask = mouse_data.var.index.isin(ct_axis_filtered_names)
 
-        # Find correlated genes between ct_axis_mask and r_axis_mask and remove them from both
-        # First remove genes that appear in both masks since they must contain both ct and region information
-        intersect_mask = self.r_axis_mask & self.ct_axis_mask
-        self.r_axis_mask[intersect_mask] = False
-        self.ct_axis_mask[intersect_mask] = False
-        # Get raw expression data for leftover relevant ct and region genes
-        r_genes_raw = mouse_data.X[:, self.r_axis_mask].toarray()
-        ct_genes_raw = mouse_data.X[:, self.ct_axis_mask].toarray()
-        # Compute correlation coefficient between all genes. Unfortunately can't just do all ct to all region
-        # and will have to only select those later
-        # Should result in a (len(r_genes_raw) + len(ct_genes_raw)) side square matrix
-        corrcoefs = stats.spearmanr(r_genes_raw, ct_genes_raw).correlation
-        # Threshold the correlations by magnitude, since a negative correlation is still information
-        corrcoefs_significant = np.abs(corrcoefs) > GENE_CORR_THRESH
-        # Find any ct genes that are correlated to a region gene or vice-versa
-        # ct genes that are correlated to some region gene
-        num_r_genes = r_genes_raw.shape[1]
-        ct_corr_genes = corrcoefs_significant[num_r_genes:, :num_r_genes].any(axis=1)
-        # region genes that are correlated to some cell type gene
-        r_corr_genes = corrcoefs_significant[:num_r_genes, num_r_genes:].any(axis=1)
-        # Convert the masks to indices to correctly remove correlated regions from them
-        r_axis_mask_indices = np.where(self.r_axis_mask)[0]
-        ct_axis_mask_indices = np.where(self.ct_axis_mask)[0]
-        # Remove correlated genes
-        self.r_axis_mask[r_axis_mask_indices[r_corr_genes]] = False
-        self.ct_axis_mask[ct_axis_mask_indices[ct_corr_genes]] = False
+        if remove_correlated:
+            # Find correlated genes between ct_axis_mask and r_axis_mask and remove them from both
+            # First remove genes that appear in both masks since they must contain both ct and region information
+            intersect_mask = self.r_axis_mask & self.ct_axis_mask
+            self.r_axis_mask[intersect_mask] = False
+            self.ct_axis_mask[intersect_mask] = False
+            # Get raw expression data for leftover relevant ct and region genes
+            r_genes_raw = mouse_data.X[:, self.r_axis_mask].toarray()
+            ct_genes_raw = mouse_data.X[:, self.ct_axis_mask].toarray()
+            # Compute correlation coefficient between all genes. Unfortunately can't just do all ct to all region
+            # and will have to only select those later
+            # Should result in a (len(r_genes_raw) + len(ct_genes_raw)) side square matrix
+            corrcoefs = stats.spearmanr(r_genes_raw, ct_genes_raw).correlation
+            # Threshold the correlations by magnitude, since a negative correlation is still information
+            corrcoefs_significant = np.abs(corrcoefs) > GENE_CORR_THRESH
+            # Find any ct genes that are correlated to a region gene or vice-versa
+            # ct genes that are correlated to some region gene
+            num_r_genes = r_genes_raw.shape[1]
+            ct_corr_genes = corrcoefs_significant[num_r_genes:, :num_r_genes].any(axis=1)
+            # region genes that are correlated to some cell type gene
+            r_corr_genes = corrcoefs_significant[:num_r_genes, num_r_genes:].any(axis=1)
+            # Convert the masks to indices to correctly remove correlated regions from them
+            r_axis_mask_indices = np.where(self.r_axis_mask)[0]
+            ct_axis_mask_indices = np.where(self.ct_axis_mask)[0]
+            # Remove correlated genes
+            self.r_axis_mask[r_axis_mask_indices[r_corr_genes]] = False
+            self.ct_axis_mask[ct_axis_mask_indices[ct_corr_genes]] = False
 
         if sc.settings.verbosity >= 0:
             print(f'Finished finding mouse cell type and region varying genes.\n'
@@ -188,32 +189,33 @@ class CTDataLoader(DataLoader):
         # Now go through genes in their original order and check if they are in our list of genes
         self.ct_axis_mask = chicken_data.var.index.isin(ct_axis_filtered_names)
 
-        # Find correlated genes between ct_axis_mask and r_axis_mask and remove them from both
-        # First remove genes that appear in both masks since they must contain both ct and region information
-        intersect_mask = self.r_axis_mask & self.ct_axis_mask
-        self.r_axis_mask[intersect_mask] = False
-        self.ct_axis_mask[intersect_mask] = False
-        # Get raw expression data for leftover relevant ct and region genes
-        r_genes_raw = chicken_data.X[:, self.r_axis_mask].toarray()
-        ct_genes_raw = chicken_data.X[:, self.ct_axis_mask].toarray()
-        # Compute correlation coefficient between all genes. Unfortunately can't just do all ct to all region
-        # and will have to only select those later
-        # Should result in a (len(r_genes_raw) + len(ct_genes_raw)) side square matrix
-        corrcoefs = stats.spearmanr(r_genes_raw, ct_genes_raw).correlation
-        # Threshold the correlations by magnitude, since a negative correlation is still information
-        corrcoefs_significant = np.abs(corrcoefs) > GENE_CORR_THRESH
-        # Find any ct genes that are correlated to a region gene or vice-versa
-        # ct genes that are correlated to some region gene
-        num_r_genes = r_genes_raw.shape[1]
-        ct_corr_genes = corrcoefs_significant[num_r_genes:, :num_r_genes].any(axis=1)
-        # region genes that are correlated to some cell type gene
-        r_corr_genes = corrcoefs_significant[:num_r_genes, num_r_genes:].any(axis=1)
-        # Convert the masks to indices to correctly remove correlated regions from them
-        r_axis_mask_indices = np.where(self.r_axis_mask)[0]
-        ct_axis_mask_indices = np.where(self.ct_axis_mask)[0]
-        # Remove correlated genes
-        self.r_axis_mask[r_axis_mask_indices[r_corr_genes]] = False
-        self.ct_axis_mask[ct_axis_mask_indices[ct_corr_genes]] = False
+        if remove_correlated:
+            # Find correlated genes between ct_axis_mask and r_axis_mask and remove them from both
+            # First remove genes that appear in both masks since they must contain both ct and region information
+            intersect_mask = self.r_axis_mask & self.ct_axis_mask
+            self.r_axis_mask[intersect_mask] = False
+            self.ct_axis_mask[intersect_mask] = False
+            # Get raw expression data for leftover relevant ct and region genes
+            r_genes_raw = chicken_data.X[:, self.r_axis_mask].toarray()
+            ct_genes_raw = chicken_data.X[:, self.ct_axis_mask].toarray()
+            # Compute correlation coefficient between all genes. Unfortunately can't just do all ct to all region
+            # and will have to only select those later
+            # Should result in a (len(r_genes_raw) + len(ct_genes_raw)) side square matrix
+            corrcoefs = stats.spearmanr(r_genes_raw, ct_genes_raw).correlation
+            # Threshold the correlations by magnitude, since a negative correlation is still information
+            corrcoefs_significant = np.abs(corrcoefs) > GENE_CORR_THRESH
+            # Find any ct genes that are correlated to a region gene or vice-versa
+            # ct genes that are correlated to some region gene
+            num_r_genes = r_genes_raw.shape[1]
+            ct_corr_genes = corrcoefs_significant[num_r_genes:, :num_r_genes].any(axis=1)
+            # region genes that are correlated to some cell type gene
+            r_corr_genes = corrcoefs_significant[:num_r_genes, num_r_genes:].any(axis=1)
+            # Convert the masks to indices to correctly remove correlated regions from them
+            r_axis_mask_indices = np.where(self.r_axis_mask)[0]
+            ct_axis_mask_indices = np.where(self.ct_axis_mask)[0]
+            # Remove correlated genes
+            self.r_axis_mask[r_axis_mask_indices[r_corr_genes]] = False
+            self.ct_axis_mask[ct_axis_mask_indices[ct_corr_genes]] = False
 
         if sc.settings.verbosity >= 0:
             print(f'Finished finding chicken cell type and region varying genes.\n'
@@ -258,14 +260,14 @@ class CTDataLoader(DataLoader):
 
 
 if __name__ == '__main__':
-    ct_data_loader = CTDataLoader(reprocess=True)
+    ct_data_loader = CTDataLoader(reprocess=True, remove_correlated=True)
 
     agglomerate = Agglomerate3D(
         cell_type_affinity=spearmanr_connectivity,
         linkage_cell='complete',
         linkage_region='homolog_avg',
         max_region_diff=1,
-        region_dist_scale=.86,
+        region_dist_scale=.8,
         verbose=False,
         pbar=True,
         integrity_check=True
