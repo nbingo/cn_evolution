@@ -1,6 +1,3 @@
-import sys
-sys.path.insert(1, '/Users/noamringach/PycharmProjects/3dtrees')
-
 from agglomerate.agglomerate_3d import Agglomerate3D
 from data.data_loader import DataLoader
 from metrics.metric_utils import spearmanr_connectivity
@@ -48,6 +45,7 @@ class CTDataLoader(DataLoader):
         # Compute DEGs between different subregions to get region axis mask
         sc.tl.rank_genes_groups(mouse_data, groupby='subregion', method='wilcoxon')
         # Filter by adjusted p value and log fold change
+        # noinspection PyTypeChecker
         r_axis_name_mask = ((pd.DataFrame(mouse_data.uns['rank_genes_groups']['pvals_adj']) < P_VAL_ADJ_THRESH) &
                             (pd.DataFrame(mouse_data.uns['rank_genes_groups']['logfoldchanges']) > AVG_LOG_FC_THRESH))
         # Our current mask is actually for names sorted by their z-scores, so have to get back to the original ordering
@@ -66,6 +64,7 @@ class CTDataLoader(DataLoader):
                 # Compute DEGs for cell types in this region
                 sc.tl.rank_genes_groups(sr, groupby='clusters', method='wilcoxon')
                 # Filter by adjusted p value and log fold change
+                # noinspection PyTypeChecker
                 deg_names_mask = ((pd.DataFrame(sr.uns['rank_genes_groups']['pvals_adj']) < P_VAL_ADJ_THRESH) &
                                   (pd.DataFrame(sr.uns['rank_genes_groups']['logfoldchanges']) > AVG_LOG_FC_THRESH))
                 # Get the names
@@ -158,6 +157,7 @@ class CTDataLoader(DataLoader):
         # Compute DEGs between different subregions to get region axis mask
         sc.tl.rank_genes_groups(chicken_data, groupby='subregion', method='wilcoxon')
         # Filter by adjusted p value and log fold change
+        # noinspection PyTypeChecker
         r_axis_name_mask = ((pd.DataFrame(chicken_data.uns['rank_genes_groups']['pvals_adj']) < P_VAL_ADJ_THRESH) &
                             (pd.DataFrame(chicken_data.uns['rank_genes_groups']['logfoldchanges']) > AVG_LOG_FC_THRESH))
         # Our current mask is actually for names sorted by their z-scores, so have to get back to the original ordering
@@ -176,6 +176,7 @@ class CTDataLoader(DataLoader):
                 # Compute DEGs for cell types in this region
                 sc.tl.rank_genes_groups(sr, groupby='clusters', method='wilcoxon')
                 # Filter by adjusted p value and log fold change
+                # noinspection PyTypeChecker
                 deg_names_mask = ((pd.DataFrame(sr.uns['rank_genes_groups']['pvals_adj']) < P_VAL_ADJ_THRESH) &
                                   (pd.DataFrame(sr.uns['rank_genes_groups']['logfoldchanges']) > AVG_LOG_FC_THRESH))
                 # Get the names
@@ -271,13 +272,13 @@ class CTDataLoader(DataLoader):
                                                for d, cluster_name in zip(ct_avg_data, np.unique(data.obs['clusters']))]
                                               ))
             to_normalize = pd.concat(to_normalize, axis=1)
-            datas_normalized.append(to_normalize.div(to_normalize.mean(axis=0).to_numpy(), axis=1))
+            datas_normalized.append(to_normalize.div(to_normalize.mean(axis=0).to_numpy(), axis=1))     # noqa
 
         names_to_c_id = dict(zip(m_to_c['Mouse gene name'], m_to_c['Gene stable ID']))
         names_to_c_id.update(zip(m_to_c['Mouse gene stable ID'], m_to_c['Gene stable ID']))
         names_to_c_id.update(zip(m_to_c['Gene name'], m_to_c['Gene stable ID']))
         for i, data in enumerate(datas_normalized):
-            datas_normalized[i] = data.rename(mapper=names_to_c_id, axis='columns')
+            datas_normalized[i] = data.rename(mapper=names_to_c_id, axis='columns')     # noqa
         self.data = pd.concat(datas_normalized, axis=0)     # Check axis
         self.r_axis_mask = np.full(self.data.shape[1], False)
         self.r_axis_mask[:c_r_axis_mask.sum()] = True

@@ -1,6 +1,3 @@
-import sys
-sys.path.insert(1, '/Users/noamringach/PycharmProjects/3dtrees')
-
 from agglomerate.batch_agglomerate_3d import BatchAgglomerate3D
 from BasicDendrogram3D import CTDataLoader
 from metrics.metric_utils import spearmanr_connectivity

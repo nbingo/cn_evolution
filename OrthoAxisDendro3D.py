@@ -1,10 +1,7 @@
-import sys
-sys.path.insert(1, '/Users/noamringach/PycharmProjects/3dtrees')
-
 from agglomerate.agglomerate_3d import Agglomerate3D
 from data.data_loader import DataLoader
 from metrics.metric_utils import spearmanr_connectivity
-from typing import Sequence, Optional
+from typing import Sequence, Optional, Literal
 import numpy as np
 import pandas as pd
 import time
@@ -14,7 +11,7 @@ from scipy import stats, sparse
 import os
 import pickle
 
-sc.settings.verbosity = 4  # Please tell me everything all the time
+sc.settings.verbosity = 0  # Please tell me everything all the time
 
 P_VAL_ADJ_THRESH = 0.01
 AVG_LOG_FC_THRESH = 2
@@ -23,7 +20,8 @@ GENE_CORR_THRESH = 0.5
 
 class CTDataLoader(DataLoader):
 
-    def __init__(self, species: str, reprocess: Optional[bool] = False, remove_correlated: Optional[bool] = True,
+    def __init__(self, species: str, reprocess: Optional[bool] = False,
+                 remove_correlated: Optional[Literal['both', 'ct', 'region']] = None,
                  dim_reduction: Optional[str] = None, n_components: Optional[int] = None):
         super().__init__()
 
@@ -99,7 +97,7 @@ class CTDataLoader(DataLoader):
         # Now go through genes in their original order and check if they are in our list of genes
         self.ct_axis_mask = species_data.var.index.isin(ct_axis_filtered_names)
 
-        if remove_correlated:
+        if remove_correlated is not None:
             # Find correlated genes between ct_axis_mask and r_axis_mask and remove them from both
             # First remove genes that appear in both masks since they must contain both ct and region information
             intersect_mask = self.r_axis_mask & self.ct_axis_mask
@@ -127,8 +125,10 @@ class CTDataLoader(DataLoader):
             r_axis_mask_indices = np.where(self.r_axis_mask)[0]
             ct_axis_mask_indices = np.where(self.ct_axis_mask)[0]
             # Remove correlated genes
-            self.r_axis_mask[r_axis_mask_indices[r_corr_genes]] = False
-            self.ct_axis_mask[ct_axis_mask_indices[ct_corr_genes]] = False
+            if remove_correlated in ['ct', 'both']:
+                self.ct_axis_mask[ct_axis_mask_indices[ct_corr_genes]] = False
+            if remove_correlated in ['region', 'both']:
+                self.r_axis_mask[r_axis_mask_indices[r_corr_genes]] = False
 
         # Average transcriptomes within each cell type and put into data frame with cell types as rows and genes as cols
         ct_names = np.unique(species_data.obs['clusters'])
@@ -162,7 +162,7 @@ class CTDataLoader(DataLoader):
 
 
 if __name__ == '__main__':
-    ct_data_loader = CTDataLoader('chicken', reprocess=True, remove_correlated=True,
+    ct_data_loader = CTDataLoader('mouse', reprocess=True, remove_correlated='ct',
                                   dim_reduction=None, n_components=50)
 
     agglomerate = Agglomerate3D(
