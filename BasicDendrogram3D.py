@@ -70,9 +70,12 @@ class CTDataLoader(DataLoader):
     def __len__(self):
         return len(self.data.index)
 
+    def to_numpy(self):
+        return self.data.to_numpy()
+
 
 if __name__ == '__main__':
-    ct_data_loader = CTDataLoader(['mouse'], ['mouse'], orthologs=False)
+    ct_data_loader = CTDataLoader(['chicken'], orthologs=False)
 
     agglomerate = Agglomerate3D(
         cell_type_affinity=spearmanr_connectivity,
