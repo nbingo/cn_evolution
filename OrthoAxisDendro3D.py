@@ -22,6 +22,7 @@ class CTDataLoader(DataLoader):
 
     def __init__(self, species: str, reprocess: Optional[bool] = False,
                  remove_correlated: Optional[Literal['both', 'ct', 'region']] = None,
+                 normalize: Optional[bool] = False,
                  dim_reduction: Optional[str] = None, n_components: Optional[int] = None):
         super().__init__()
 
@@ -107,8 +108,10 @@ class CTDataLoader(DataLoader):
             # Find correlated genes between ct_axis_mask and r_axis_mask and remove them from both
             # First remove genes that appear in both masks since they must contain both ct and region information
             intersect_mask = self.r_axis_mask & self.ct_axis_mask
-            self.r_axis_mask[intersect_mask] = False
-            self.ct_axis_mask[intersect_mask] = False
+            if remove_correlated in ['ct', 'both']:
+                self.ct_axis_mask[intersect_mask] = False
+            if remove_correlated in ['region', 'both']:
+                self.r_axis_mask[intersect_mask] = False
             # Get raw expression data for leftover relevant ct and region genes
             r_genes_raw = species_data.X[:, self.r_axis_mask]
             ct_genes_raw = species_data.X[:, self.ct_axis_mask]
@@ -144,7 +147,8 @@ class CTDataLoader(DataLoader):
         # Divide each row by mean, as in Tosches et al, rename columns,
         # and transpose so that column labels are genes and rows are cell types
         # Divide each row by mean
-        self.data = self.data.div(self.data.mean(axis=0).to_numpy(), axis=1)        # noqa
+        if normalize:
+            self.data = self.data.div(self.data.mean(axis=0).to_numpy(), axis=1)        # noqa
 
         # Save data
         data_dict = {'data': self.data, 'ct_axis_mask': self.ct_axis_mask, 'r_axis_mask': self.r_axis_mask}
@@ -168,15 +172,15 @@ class CTDataLoader(DataLoader):
 
 
 if __name__ == '__main__':
-    ct_data_loader = CTDataLoader('mouse', reprocess=True, remove_correlated='ct',
+    ct_data_loader = CTDataLoader('mouse', reprocess=False, remove_correlated='ct', normalize=True,
                                   dim_reduction=None, n_components=50)
 
     agglomerate = Agglomerate3D(
         cell_type_affinity=spearmanr_connectivity,
         linkage_cell='complete',
-        linkage_region='homolog_avg',
+        linkage_region='homolog_mnn',
         max_region_diff=1,
-        region_dist_scale=.7,
+        region_dist_scale=.1,
         verbose=False,
         pbar=True,
         integrity_check=True
