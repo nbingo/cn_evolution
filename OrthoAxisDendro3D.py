@@ -24,7 +24,7 @@ sc.settings.verbosity = 0  # Please tell me everything all the time
 P_VAL_ADJ_THRESH = 0.01
 AVG_LOG_FC_THRESH = 2
 GENE_CORR_THRESH = 0.5
-BATCH_SIZE = 500
+BATCH_SIZE = 200
 
 
 class StratifiedSampler(Sampler):
@@ -98,7 +98,6 @@ class CTDataLoader(data.data_loader.DataLoader):
 
         filename = f'{species}_ex_colors'
 
-        self.l1_weight = l1_weight
         self.learning_rate = learning_rate
         self.device = 'cpu'
 
@@ -136,6 +135,8 @@ class CTDataLoader(data.data_loader.DataLoader):
         if gene_selection_method == 'deg':
             self._deg_select(dim_reduction, species_data)
         elif gene_selection_method == 'lasso':
+            if isinstance(l1_weight, float):
+                l1_weight = [l1_weight]
             for label in ['subregion', 'clusters']:
                 num_labels = self.n_subregions if label == 'subregion' else self.n_clusters
                 # define the model
@@ -155,12 +156,20 @@ class CTDataLoader(data.data_loader.DataLoader):
                     val_dl = DataLoader(val_ds, shuffle=True, batch_size=BATCH_SIZE, num_workers=0)
                     optimizer = optim.Adam(model.parameters(), lr=self.learning_rate)
                     # train
-                    loss_history = self._train_model(model, train_dl, val_dl, optimizer, epochs=25)
-                    # save the model
-                    torch.save(model.state_dict(), model_file)
-                    plt.plot(loss_history[:, 0], label='train loss')
-                    plt.plot(loss_history[:, 1], label='val loss')
-                    plt.legend()
+                    num_nonzero_features_by_alpha = []
+                    for alpha in l1_weight:
+                        loss_history = self._train_model(model, train_dl, val_dl, optimizer, l1_weight=alpha, epochs=50)
+                        max_weight_per_gene = torch.abs(model[-1].weight).max(dim=0)[0]
+                        num_nonzero_features_by_alpha.append([(max_weight_per_gene > 1e-4).sum(), alpha])
+                        # save the model
+                        torch.save(model.state_dict(), model_file)
+                        plt.plot(loss_history[:, 0], label='train loss')
+                        plt.plot(loss_history[:, 1], label='val loss')
+                        plt.legend()
+                        plt.show()
+                    num_nonzero_features_by_alpha = np.array(num_nonzero_features_by_alpha)
+                    plt.plot(num_nonzero_features_by_alpha[:, 0], num_nonzero_features_by_alpha[:, 1])
+                    plt.savefig('num_features_selected_v_l1_weight.pdf')
                     plt.show()
                 else:
                     model.load_state_dict(torch.load(model_file))
@@ -194,7 +203,7 @@ class CTDataLoader(data.data_loader.DataLoader):
         with open(f'withcolors_preprocessed/{filename}.pickle', mode='wb') as file:
             pickle.dump(data_dict, file)
 
-    def _calc_val_loss(self, loader: DataLoader, model: nn.Module):
+    def _calc_val_loss(self, loader: DataLoader, model: nn.Module, l1_weight: float):
         num_correct = 0
         num_samples = 0
         model.eval()  # set model to evaluation mode
@@ -206,7 +215,7 @@ class CTDataLoader(data.data_loader.DataLoader):
                 scores = model(x)
                 loss = F.cross_entropy(scores, y)
                 for param in model.parameters():
-                    loss += F.l1_loss(param, torch.zeros_like(param)) * self.l1_weight
+                    loss += F.l1_loss(param, torch.zeros_like(param)) * l1_weight
                 losses.append(loss.item())
                 _, preds = scores.max(1)
                 num_correct += (preds == y).sum()
@@ -216,7 +225,7 @@ class CTDataLoader(data.data_loader.DataLoader):
             return np.mean(losses)
 
     def _train_model(self, model: nn.Module, train_dl: DataLoader, val_dl: DataLoader,
-                     optimizer: optim.Optimizer, epochs: int = 1, loss_chang_lim: float = 1e-3,
+                     optimizer: optim.Optimizer, l1_weight: float, epochs: int = 1, loss_chang_lim: float = 1e-3,
                      print_every: int = 1):
         loss_history = []
         for epoch in range(epochs):
@@ -229,7 +238,7 @@ class CTDataLoader(data.data_loader.DataLoader):
                 loss = F.cross_entropy(scores, y)
                 reg_loss = 0
                 for param in model.parameters():
-                    reg_loss += F.l1_loss(param, torch.zeros_like(param)) * self.l1_weight
+                    reg_loss += F.l1_loss(param, torch.zeros_like(param)) * l1_weight
                 loss += reg_loss
                 epoch_loss_history.append(loss.item())
 
@@ -242,7 +251,7 @@ class CTDataLoader(data.data_loader.DataLoader):
             mean_epoch_loss = np.mean(epoch_loss_history)
             if (len(loss_history) > 1) and (np.abs(loss_history[-1][0] - loss_history[-2][0]) < loss_chang_lim):
                 break
-            loss_history.append([mean_epoch_loss, self._calc_val_loss(val_dl, model)])
+            loss_history.append([mean_epoch_loss, self._calc_val_loss(val_dl, model, l1_weight)])
         return np.array(loss_history)
 
     def _deg_select(self, dim_reduction, species_data):
@@ -295,10 +304,11 @@ class CTDataLoader(data.data_loader.DataLoader):
         # Find correlated genes between ct_axis_mask and r_axis_mask and remove them from both
         # First remove genes that appear in both masks since they must contain both ct and region information
         intersect_mask = self.r_axis_mask & self.ct_axis_mask
-        if remove_correlated in ['ct', 'both']:
+        if (remove_correlated in ['ct', 'both']) and not self.ct_axis_mask[~intersect_mask].any():
             self.ct_axis_mask[intersect_mask] = False
-        if remove_correlated in ['region', 'both']:
+        if (remove_correlated in ['region', 'both']) and not self.r_axis_mask[~intersect_mask].any():
             self.r_axis_mask[intersect_mask] = False
+
         # Get raw expression data for leftover relevant ct and region genes
         r_genes_raw = species_data.X[:, self.r_axis_mask]
         ct_genes_raw = species_data.X[:, self.ct_axis_mask]
@@ -343,8 +353,9 @@ class CTDataLoader(data.data_loader.DataLoader):
 
 
 if __name__ == '__main__':
-    ct_data_loader = CTDataLoader('mouse', reprocess=True, remove_correlated='ct', normalize=True,
+    ct_data_loader = CTDataLoader('mouse', reprocess=True, remove_correlated=None, normalize=True,
                                   gene_selection_method='lasso', lasso_cache_dir='models/lasso/M_lasso',
+                                  l1_weight=np.logspace(-4, 2, num=6),
                                   dim_reduction=None, n_components=50)
 
     agglomerate = Agglomerate3D(
