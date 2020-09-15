@@ -9,6 +9,7 @@ import scanpy as sc
 from anndata import AnnData
 from scipy import stats, sparse
 from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.linear_model import MultiTaskLasso, MultiTaskElasticNet
 import os
 import pickle
 import torch
@@ -86,9 +87,10 @@ class SparseDataSet(Dataset):
 class CTDataLoader(data.data_loader.DataLoader):
 
     def __init__(self, species: str, reprocess: Optional[bool] = False,
-                 gene_selection_method: Optional[Literal['deg', 'lasso']] = 'deg',
-                 lasso_cache_dir: Optional[str] = None,
-                 l1_weight: Optional[Union[float, Sequence[float]]] = 1e-2, learning_rate: Optional[float] = 1e-3,
+                 gene_selection_method: Optional[Literal['deg', 'lasso', 'elastic-net']] = 'deg',
+                 model_cache_dir: Optional[str] = None,
+                 alpha: Optional[Union[float, Sequence[float]]] = 1e-2, learning_rate: Optional[float] = 1e-3,
+                 equal_weight: Optional[bool] = True,
                  train_split: Optional[float] = 0.8, n_jobs: Optional[int] = 15,
                  remove_correlated: Optional[Literal['both', 'ct', 'region']] = None,
                  normalize: Optional[bool] = False,
@@ -131,61 +133,95 @@ class CTDataLoader(data.data_loader.DataLoader):
         self.n_var = len(species_data.var.index)
         self.n_subregions = len(np.unique(species_data.obs['subregion']))
         self.n_clusters = len(np.unique(species_data.obs['clusters']))
+        self.n_obs = len(species_data.obs.index)
 
         if gene_selection_method == 'deg':
             self._deg_select(dim_reduction, species_data)
-        elif gene_selection_method == 'lasso':
-            if isinstance(l1_weight, float):
-                l1_weight = [l1_weight]
+        elif gene_selection_method in ['lasso', 'elastic-net']:
+            # if isinstance(alpha, float):
+            #     alpha = [alpha]
             for label in ['subregion', 'clusters']:
-                num_labels = self.n_subregions if label == 'subregion' else self.n_clusters
-                # define the model
-                model = nn.Sequential(
-                    # nn.BatchNorm1d(self.n_var),
-                    nn.Linear(self.n_var, num_labels)
-                )
-                model_file = f'{lasso_cache_dir}_{label}.pt'
-                if lasso_cache_dir is None or not os.path.exists(model_file):
-                    print(f'\nTraining lasso on {label}.\n')
-                    # Create the dataset and dataloader
-                    ds = SparseDataSet(species_data, label)
-                    train_size = int(train_split * len(ds))
-                    val_size = len(ds) - train_size
-                    train_ds, val_ds = torch.utils.data.random_split(ds, [train_size, val_size])
-                    train_dl = DataLoader(train_ds, shuffle=True, batch_size=BATCH_SIZE, num_workers=0)
-                    val_dl = DataLoader(val_ds, shuffle=True, batch_size=BATCH_SIZE, num_workers=0)
-                    optimizer = optim.Adam(model.parameters(), lr=self.learning_rate)
-                    # train
-                    num_nonzero_features_by_alpha = []
-                    for alpha in l1_weight:
-                        loss_history = self._train_model(model, train_dl, val_dl, optimizer, l1_weight=alpha, epochs=50)
-                        max_weight_per_gene = torch.abs(model[-1].weight).max(dim=0)[0]
-                        num_nonzero_features_by_alpha.append([(max_weight_per_gene > 1e-4).sum(), alpha])
-                        # save the model
-                        torch.save(model.state_dict(), model_file)
-                        plt.plot(loss_history[:, 0], label='train loss')
-                        plt.plot(loss_history[:, 1], label='val loss')
-                        plt.legend()
-                        plt.show()
-                    num_nonzero_features_by_alpha = np.array(num_nonzero_features_by_alpha)
-                    plt.plot(num_nonzero_features_by_alpha[:, 0], num_nonzero_features_by_alpha[:, 1])
-                    plt.savefig('num_features_selected_v_l1_weight.pdf')
-                    plt.show()
+                if equal_weight:
+                    # get count of number of occurrences of each label
+                    label_to_count = species_data.obs[label].value_counts(normalize=True).to_dict()
+                    # Map each observation to its appropriate label appearance frequency
+                    w = species_data.obs[label].map(label_to_count)
+                    # Diagonalize and take square root to appropriately normalize data
+                    w = np.diag(np.sqrt(w))
+                    # normalize data
+                    transcriptomes = np.matmul(w, species_data.X.toarray())
                 else:
-                    model.load_state_dict(torch.load(model_file))
-                # Get the max weight per gene to see whether it's relevant to at least one subregion
-                with torch.no_grad():
-                    max_weight_per_gene = torch.abs(model[-1].weight).max(dim=0)[0]
-                    with torch.no_grad():
-                        sns.distplot(max_weight_per_gene)
-                        plt.show()
+                    transcriptomes = species_data.X.toarray()
+                model_file = f'{model_cache_dir}/{gene_selection_method}/{species[0].upper()}_{label}_a-{alpha}.pt'
+                if model_cache_dir is not None and os.path.exists(model_file):
+                    with open(model_file, 'rb') as file:
+                        model = pickle.load(file)
+                else:
+                    # Create one-hot encoding of labels
+                    num_labels = self.n_subregions if label == 'subregion' else self.n_clusters
+                    label_to_id = {r: i for i, r in enumerate(np.unique(species_data.obs[label]))}
+                    labels = species_data.obs[label].map(label_to_id)
+                    labels_expanded = np.zeros((self.n_obs, num_labels))
+                    labels_expanded[np.arange(self.n_obs), labels] = 1
+                    if gene_selection_method == 'lasso':
+                        model = MultiTaskLasso(alpha=alpha, max_iter=10000)
+                    else:
+                        model = MultiTaskElasticNet(alpha=alpha, max_iter=10000)
+                    model.fit(transcriptomes, labels_expanded)
+                    with open(model_file, 'wb') as file:
+                        pickle.dump(model, file, protocol=5)
+                max_weight_per_gene = (model.coef_ != 0).max(axis=0)
+                # # define the model
+                # model = nn.Sequential(
+                #     # nn.BatchNorm1d(self.n_var),
+                #     nn.Linear(self.n_var, num_labels)
+                # )
+                # model_file = f'{model_cache_dir}_{label}.pt'
+                # if model_cache_dir is None or not os.path.exists(model_file):
+                #     print(f'\nTraining lasso on {label}.\n')
+                #     # Create the dataset and dataloader
+                #     ds = SparseDataSet(species_data, label)
+                #     train_size = int(train_split * len(ds))
+                #     val_size = len(ds) - train_size
+                #     train_ds, val_ds = torch.utils.data.random_split(ds, [train_size, val_size])
+                #     train_dl = DataLoader(train_ds, shuffle=True, batch_size=BATCH_SIZE, num_workers=0)
+                #     val_dl = DataLoader(val_ds, shuffle=True, batch_size=BATCH_SIZE, num_workers=0)
+                #     optimizer = optim.Adam(model.parameters(), lr=self.learning_rate)
+                #     # train
+                #     num_nonzero_features_by_alpha = []
+                #     for alpha in alpha:
+                #         loss_history = self._train_model(model, train_dl, val_dl, optimizer, alpha=alpha, epochs=50)
+                #         max_weight_per_gene = torch.abs(model[-1].weight).max(dim=0)[0]
+                #         num_nonzero_features_by_alpha.append([(max_weight_per_gene > 1e-4).sum(), alpha])
+                #         # save the model
+                #         torch.save(model.state_dict(), model_file)
+                #         plt.plot(loss_history[:, 0], label='train loss')
+                #         plt.plot(loss_history[:, 1], label='val loss')
+                #         plt.legend()
+                #         plt.show()
+                #     num_nonzero_features_by_alpha = np.array(num_nonzero_features_by_alpha)
+                #     plt.plot(num_nonzero_features_by_alpha[:, 0], num_nonzero_features_by_alpha[:, 1])
+                #     plt.savefig('num_features_selected_v_l1_weight.pdf')
+                #     plt.show()
+                # else:
+                #     model.load_state_dict(torch.load(model_file))
+                # # Get the max weight per gene to see whether it's relevant to at least one subregion
+                # with torch.no_grad():
+                #     max_weight_per_gene = torch.abs(model[-1].weight).max(dim=0)[0]
+                #     with torch.no_grad():
+                #         sns.distplot(max_weight_per_gene)
+                #         plt.show()
                 if label == 'subregion':
-                    self.r_axis_mask = max_weight_per_gene > 1e-4
+                    self.r_axis_mask = max_weight_per_gene != 0
                 else:
-                    self.ct_axis_mask = max_weight_per_gene > 1e-4
+                    self.ct_axis_mask = max_weight_per_gene != 0
+        print(f'Before removing correlated genes, found {self.r_axis_mask.sum()} region genes '
+              f'and {self.ct_axis_mask.sum()} cell type genes.')
 
         if remove_correlated is not None:
             self._remove_r_ct_correlated(remove_correlated, species_data)
+            print(f'After removing correlated genes, found {self.r_axis_mask.sum()} region genes '
+                  f'and {self.ct_axis_mask.sum()} cell type genes.')
 
         # Average transcriptomes within each cell type and put into data frame with cell types as rows and genes as cols
         ct_names = np.unique(species_data.obs['clusters'])
@@ -196,7 +232,7 @@ class CTDataLoader(data.data_loader.DataLoader):
         # and transpose so that column labels are genes and rows are cell types
         # Divide each row by mean
         if normalize:
-            self.data = self.data.div(self.data.mean(axis=0).to_numpy(), axis=1)        # noqa
+            self.data = self.data.div(self.data.mean(axis=0).to_numpy(), axis=1)  # noqa
 
         # Save data
         data_dict = {'data': self.data, 'ct_axis_mask': self.ct_axis_mask, 'r_axis_mask': self.r_axis_mask}
@@ -353,9 +389,9 @@ class CTDataLoader(data.data_loader.DataLoader):
 
 
 if __name__ == '__main__':
-    ct_data_loader = CTDataLoader('mouse', reprocess=True, remove_correlated=None, normalize=True,
-                                  gene_selection_method='lasso', lasso_cache_dir='models/lasso/M_lasso',
-                                  l1_weight=np.logspace(-4, 2, num=6),
+    ct_data_loader = CTDataLoader('mouse', reprocess=True, remove_correlated='ct', normalize=True,
+                                  gene_selection_method='elastic-net', model_cache_dir='models',
+                                  alpha=3e-1,  # np.logspace(-4, 2, num=6),
                                   dim_reduction=None, n_components=50)
 
     agglomerate = Agglomerate3D(
