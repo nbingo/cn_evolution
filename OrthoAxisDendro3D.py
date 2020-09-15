@@ -152,7 +152,8 @@ class CTDataLoader(data.data_loader.DataLoader):
                     transcriptomes = np.matmul(w, species_data.X.toarray())
                 else:
                     transcriptomes = species_data.X.toarray()
-                model_file = f'{model_cache_dir}/{gene_selection_method}/{species[0].upper()}_{label}_a-{alpha}.pt'
+                model_file = f'{model_cache_dir}/{gene_selection_method}/' \
+                             f'{species[0].upper()}_normalized-{equal_weight}_{label}_a-{alpha}.pt'
                 if model_cache_dir is not None and os.path.exists(model_file):
                     with open(model_file, 'rb') as file:
                         model = pickle.load(file)
